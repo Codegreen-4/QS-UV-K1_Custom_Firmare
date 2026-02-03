@@ -1,9 +1,6 @@
-
----
-
 # Stats
 
-![Alt](https://repobeats.axiom.co/api/embed/0bb47206da90670f6423db286d17ed60fad3f6e1.svg "Repobeats analytics image")
+![Alt](https://repobeats.axiom.co/api/embed/ecdd86aa536b716f088339a0c5ee734558f78c28.svg "Repobeats analytics image")
 
 # N7SIX firmware port for the UV-K1 and UV-K5 V3 using the PY32F071 MCU
 
@@ -367,7 +364,7 @@ Many thanks to various people:
 - @Ismo OH2FTG
 - [OneOfEleven](https://github.com/OneOfEleven)
 - @d1ced95
-- [Armel, F4HWN](https://github.com/armel)
+- [Armel, N7SIX](https://github.com/armel)
 - and others I forget
 
 ## License

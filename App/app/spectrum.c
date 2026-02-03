@@ -1,6 +1,52 @@
+#include "frequencies.h"
+#include "driver/bk4819.h"
+
+// Utility: Set LED color based on frequency and TX/RX state
+// hasSignal: true if signal is present (RSSI above threshold), false if no signal
+static void SetBandLed(uint32_t freq, bool isTx, bool hasSignal)
+{
+    // If no signal, turn both LEDs OFF and return
+    if (!hasSignal) {
+        BK4819_ToggleGpioOut(BK4819_GPIO5_PIN1_RED, false);
+        BK4819_ToggleGpioOut(BK4819_GPIO6_PIN2_GREEN, false);
+        return;
+    }
+
+    // Always turn both LEDs OFF first to avoid stuck states
+    BK4819_ToggleGpioOut(BK4819_GPIO5_PIN1_RED, false);
+    BK4819_ToggleGpioOut(BK4819_GPIO6_PIN2_GREEN, false);
+
+    FREQUENCY_Band_t band = FREQUENCY_GetBand(freq);
+    if (isTx) {
+        // TX: Always RED only
+        BK4819_ToggleGpioOut(BK4819_GPIO5_PIN1_RED, true);
+    } else {
+        // RX: VHF = GREEN only, UHF = RED+GREEN, else RED only
+        if (band == BAND3_137MHz || band == BAND4_174MHz) {
+            BK4819_ToggleGpioOut(BK4819_GPIO6_PIN2_GREEN, true);
+        } else if (band == BAND6_400MHz) {
+            BK4819_ToggleGpioOut(BK4819_GPIO5_PIN1_RED, true);
+            BK4819_ToggleGpioOut(BK4819_GPIO6_PIN2_GREEN, true);
+        } else {
+            BK4819_ToggleGpioOut(BK4819_GPIO5_PIN1_RED, true);
+        }
+    }
+}
+
+#define PEAK_HOLD_DECAY 2
+
+
+#include "ui/main.h"
+
+// ...existing code...
+
+// --- Peak Hold Buffer ---
+// Place after SPECTRUM_MAX_STEPS and other buffer definitions
+
+
 /**
  * @file spectrum.c
- * @brief Professional-grade Spectrum Analyzer + Waterfall (4x4 Bayer Implementation) for QS-UV-K1 Radio
+ * @brief Professional-grade Spectrum Analyzer for QS-UV-K1 Radio
  *
  * This module implements a comprehensive spectrum analyzer with professional-grade
  * signal visualization comparable to commercial radios like Yaesu. It provides
@@ -53,85 +99,12 @@
  *     limitations under the License.
  */
 
-#include "frequencies.h"
-#include "ui/ui.h"
-#include "ui/status.h"
-#include "ui/battery.h"
-#include "helper/battery.h"
-#include "board.h"
-
-#include <stdbool.h>  // <--- This MUST be first to fix the 'unknown type name bool' error
-#include <stdint.h>
-#include "driver/bk4819.h"
-#include "functions.h"
-
-// Forward declaration must be ABOVE Tick() to fix the "static follows non-static" error
-static void PushWaterfallLine(void);
-
-extern uint16_t gBatteryVoltage;
-
-static const uint32_t ScanStepTable[] = {
-    1, 10, 50, 100, 250, 500, 625, 833, 1000, 1250, 1500, 2000, 2500, 5000, 10000
-};
-#define SCAN_STEP_COUNT (sizeof(ScanStepTable) / sizeof(ScanStepTable[0]))
-
-// Utility: Set LED color based on frequency and TX/RX state
-// hasSignal: true if signal is present (RSSI above threshold), false if no signal
-static void SetBandLed(uint32_t freq, bool isTx, bool hasSignal)
-{
-    // If no signal, turn both LEDs OFF and return
-    if (!hasSignal) {
-        BK4819_ToggleGpioOut(BK4819_GPIO5_PIN1_RED, false);
-        BK4819_ToggleGpioOut(BK4819_GPIO6_PIN2_GREEN, false);
-        return;
-    }
-
-    // Always turn both LEDs OFF first to avoid stuck states
-    BK4819_ToggleGpioOut(BK4819_GPIO5_PIN1_RED, false);
-    BK4819_ToggleGpioOut(BK4819_GPIO6_PIN2_GREEN, false);
-
-    FREQUENCY_Band_t band = FREQUENCY_GetBand(freq);
-    if (isTx) {
-        // TX: Always RED only
-        BK4819_ToggleGpioOut(BK4819_GPIO5_PIN1_RED, true);
-    } else {
-        // RX: VHF = GREEN only, UHF = RED+GREEN, else RED only
-        if (band == BAND3_137MHz || band == BAND4_174MHz) {
-            BK4819_ToggleGpioOut(BK4819_GPIO6_PIN2_GREEN, true);
-        } else if (band == BAND6_400MHz) {
-            BK4819_ToggleGpioOut(BK4819_GPIO5_PIN1_RED, true);
-            BK4819_ToggleGpioOut(BK4819_GPIO6_PIN2_GREEN, true);
-        } else {
-            BK4819_ToggleGpioOut(BK4819_GPIO5_PIN1_RED, true);
-        }
-    }
-}
-
-#define PEAK_HOLD_DECAY 2
-
-
-#include "ui/main.h"
 #include <string.h>
 
 #include "am_fix.h"
 #include "app/spectrum.h"
 #include "audio.h"
 #include "misc.h"
-
-#include "audio.h"
-#include "radio.h"
-
-static void DrawF(uint32_t f);
-static void DrawStatus(void);
-static void DrawSpectrumEnhanced(void);
-static void SmoothRssiHistory(const uint16_t *input, uint16_t *output, uint8_t count);
-static void DrawSpectrumCurve(const uint16_t *smoothed, uint8_t bars);
-
-// Remove your manual 'extern void BK4819_WriteRegister...' line
-// And use the correct type from the header:
-#include "driver/bk4819.h" 
-
-uint8_t Rssi2Y(uint16_t rssi);
 
 #ifdef ENABLE_SCAN_RANGES
 #include "chFrScanner.h"
@@ -168,7 +141,7 @@ uint8_t Rssi2Y(uint16_t rssi);
 #define SPECTRUM_MAX_STEPS          128U
 
 /** @brief Number of waterfall history lines */
-#define WATERFALL_HISTORY_DEPTH     12U
+#define WATERFALL_HISTORY_DEPTH     16U
 
 /** @brief Maximum frequency input length */
 #define FREQ_INPUT_MAX_LENGTH       10U
@@ -193,15 +166,6 @@ uint8_t Rssi2Y(uint16_t rssi);
 
 /** @brief Maximum dBm value for display */
 #define DISPLAY_DBM_MAX             -50
-
-#define WATERFALL_ROWS 40
-
-// --- Function Prototypes ---
-static bool IsPeakOverLevel(void);
-static void AutoTriggerLevel(void);
-static void UpdateWaterfall(void);
-static void DrawSpectrumEnhanced(void);
-static void ShowChannelName(uint32_t f);
 
 // =============================================================================
 // DATA STRUCTURES
@@ -491,6 +455,16 @@ static void SetRegMenuValue(uint8_t st, bool add)
  * @param nx X coordinate
  * @param fill true to set pixels, false to clear
  */
+static void DrawVLine(int sy, int ey, int nx, bool fill)
+{
+    for (int i = sy; i <= ey; i++)
+    {
+        if (i < 56 && nx < 128)
+        {
+            PutPixel(nx, i, fill);
+        }
+    }
+}
 
 #ifndef ENABLE_FEAT_N7SIX
 static void GUI_DisplaySmallest(const char *pString, uint8_t x, uint8_t y,
@@ -629,6 +603,8 @@ static void SetF(uint32_t f)
 
 // Spectrum related
 
+bool IsPeakOverLevel() { return peak.rssi >= settings.rssiTriggerLevel; }
+
 static void ResetPeak()
 {
     peak.t = 0;
@@ -669,25 +645,28 @@ bool IsCenterMode() { return settings.scanStepIndex < S_STEP_2_5kHz; }
 // scan step in 0.01khz
 uint16_t GetScanStep() { return scanStepValues[settings.scanStepIndex]; }
 
-
-#define SPECTRUM_MAX_SAFE_STEPS 256U
 uint16_t GetStepsCount()
 {
-    // Deep Review: We use a simple mask to ensure the index is always 0-3
-    // This prevents KEY_4 from ever "doing nothing"
-    uint8_t index = settings.stepsCount & 0x03; 
-
-    switch (index) {
-        case 0: return 128;
-        case 1: return 64;
-        case 2: return 32;
-        case 3: return 16;
-        default: return 128;
+#ifdef ENABLE_SCAN_RANGES
+    if (gScanRangeStart)
+    {
+        uint32_t range = gScanRangeStop - gScanRangeStart;
+        uint16_t step = GetScanStep();
+        return (range / step) + 1;  // +1 to include up limit
     }
+#endif
+    return 128 >> settings.stepsCount;
 }
 
 #ifdef ENABLE_SCAN_RANGES
-
+static uint16_t GetStepsCountDisplay()
+{
+    if (gScanRangeStart)
+    {
+        return (gScanRangeStop - gScanRangeStart) / GetScanStep();
+    }
+    return GetStepsCount();
+}
 #endif
 
 uint32_t GetBW() { return GetStepsCount() * GetScanStep(); }
@@ -814,7 +793,6 @@ static void ResetScanStats()
 {
     scanInfo.rssi = 0;
     scanInfo.rssiMax = 0;
-    scanInfo.rssiMin = 0xFFFF; // Reset min for noise floor tracking
     scanInfo.iPeak = 0;
     scanInfo.fPeak = 0;
 }
@@ -829,19 +807,6 @@ static void InitScan()
     scanInfo.measurementsCount = GetStepsCount();
 }
 
-#ifdef ENABLE_SCAN_RANGES
-// Insert it here:
-static bool IsBlacklisted(uint16_t idx)
-{
-    for (uint8_t i = 0; i < ARRAY_SIZE(blacklistFreqs); i++)
-    {
-        if (blacklistFreqs[i] == idx)
-            return true;
-    }
-    return false;
-}
-#endif
-
 static void ResetBlacklist()
 {
     for (int i = 0; i < 128; ++i)
@@ -855,17 +820,16 @@ static void ResetBlacklist()
 #endif
 }
 
-void RelaunchScan()
+static void RelaunchScan()
 {
-    // The hardware step is the Total Width (Span) divided by the Number of Points (Z)
-    // This allows "Z" to change detail without "S" interfering.
-    scanInfo.scanStep = settings.frequencyChangeStep / GetStepsCount();
-    
-    scanInfo.f = currentFreq - (settings.frequencyChangeStep / 2);
-    scanInfo.i = 0;
-    
-    memset(rssiHistory, 0, sizeof(rssiHistory));
-    newScanStart = true;
+    InitScan();
+    ResetPeak();
+    ToggleRX(false);
+#ifdef SPECTRUM_AUTOMATIC_SQUELCH
+    settings.rssiTriggerLevel = RSSI_MAX_VALUE;
+#endif
+    preventKeypress = true;
+    scanInfo.rssiMin = RSSI_MAX_VALUE;
 }
 
 /**
@@ -934,6 +898,55 @@ static void UpdateScanInfo()
  * @see UpdatePeakInfoForce() - Called when peak changes or timeout
  * @see scanInfo.rssiMax - Maximum RSSI from current scan
  */
+static void AutoTriggerLevel()
+{
+    // Scan-based auto-adjust: Update trigger after every spectrum scan
+    // This ensures trigger level tracks signal changes automatically
+    
+    if (settings.rssiTriggerLevel == RSSI_MAX_VALUE)
+    {
+        // Initial setup on first scan: Start with HIGH threshold to prevent false positives
+        // This prevents squelch opening from background noise on startup
+        // Real signals will pull the trigger down through normal adaptive behavior
+        uint16_t initialTrigger = scanInfo.rssiMax + 20;  // +20dB (much higher guard)
+        settings.rssiTriggerLevel = clamp(initialTrigger, 0, RSSI_MAX_VALUE);
+    }
+    else
+    {
+        // Professional scan-based auto-adjust:
+        // Update trigger to maintain peak + 8dB relationship
+        // Aggressive tracking for immediate response to band changes
+        uint16_t newTrigger = clamp(scanInfo.rssiMax + 8, 0, RSSI_MAX_VALUE);
+        
+        // Enforce minimum threshold to prevent squelch false positives on idle bands
+        // This prevents the trigger from being set too low by background noise
+        const uint16_t MIN_TRIGGER = scanInfo.rssiMax + 15;  // Minimum safety margin (10dB)
+        if (newTrigger < MIN_TRIGGER)
+            newTrigger = MIN_TRIGGER;
+        
+        // Apply faster adjustment for responsive trigger tracking
+        // Signal changes are tracked within 2-3 scans for immediate visual feedback
+        if (newTrigger > settings.rssiTriggerLevel)
+        {
+            // Signal getting stronger: increase trigger quickly (±3 per scan)
+            int16_t diff = (int16_t)newTrigger - (int16_t)settings.rssiTriggerLevel;
+            int16_t step = (diff > 6) ? 3 : ((diff > 3) ? 2 : 1);
+            settings.rssiTriggerLevel += step;
+            if (settings.rssiTriggerLevel > newTrigger)
+                settings.rssiTriggerLevel = newTrigger;
+        }
+        else if (newTrigger < settings.rssiTriggerLevel - 4)
+        {
+            // Signal getting weaker: decrease trigger quickly (±3 per scan)
+            int16_t diff = (int16_t)settings.rssiTriggerLevel - (int16_t)newTrigger;
+            int16_t step = (diff > 6) ? 3 : ((diff > 3) ? 2 : 1);
+            settings.rssiTriggerLevel -= step;
+            if (settings.rssiTriggerLevel < newTrigger)
+                settings.rssiTriggerLevel = newTrigger;
+        }
+        // Otherwise: hold current trigger (prevents jumping on small fluctuations)
+    }
+}
 
 /**
  * @brief Professional peak detection with hysteresis filtering
@@ -1004,6 +1017,10 @@ static void SetRssiHistory(uint16_t idx, uint16_t rssi)
 
 /**
  * @brief Perform real-time RSSI measurement
+ *
+ * Reads current receiver signal strength from hardware and stores it
+ * in both the current scan structure and history buffer for waterfall
+ * display. This is called continuously during spectrum scanning.
  */
 static void Measure()
 {
@@ -1011,7 +1028,7 @@ static void Measure()
     SetRssiHistory(scanInfo.i, rssi);           // Store in history buffer
 }
 
-// --- 1. CORE MATH & UTILITIES ---
+// Update things by keypress
 
 static uint16_t dbm2rssi(int dBm)
 {
@@ -1025,162 +1042,33 @@ static void ClampRssiTriggerLevel()
               dbm2rssi(settings.dbMax));
 }
 
-uint8_t Rssi2PX(uint16_t rssi, uint8_t pxMin, uint8_t pxMax)
-{
-    const int DB_MIN = settings.dbMin << 1;
-    const int DB_MAX = settings.dbMax << 1;
-    const int DB_RANGE = DB_MAX - DB_MIN;
-    const uint8_t PX_RANGE = pxMax - pxMin;
-    int dbm = (Rssi2DBm(rssi) << 1); 
-    if (dbm < DB_MIN) dbm = DB_MIN;
-    if (dbm > DB_MAX) dbm = DB_MAX;
-
-    return ((dbm - DB_MIN) * PX_RANGE + DB_RANGE / 2) / DB_RANGE + pxMin;
-}
-
-uint8_t Rssi2Y(uint16_t rssi)
-{
-    return DrawingEndY - Rssi2PX(rssi, 0, DrawingEndY);
-}
-
-// --- 2. SIGNAL PROCESSING & HELPER DRAWING ---
-
-static void SmoothRssiHistory(const uint16_t *input, uint16_t *output, uint8_t count)
-{
-    output[0] = input[0];
-    output[count-1] = input[count-1];
-    for (uint8_t i = 1; i < count - 1; ++i)
-    {
-        output[i] = (input[i-1] + (input[i] << 1) + input[i+1]) >> 2;
-    }
-}
-
-static void DrawSpectrumCurve(const uint16_t *smoothed, uint8_t bars)
-{
-    uint8_t prev_x = 0;
-    uint8_t prev_y = Rssi2Y(smoothed[0]);
-    for (uint8_t i = 1; i < bars; ++i)
-    {
-        uint8_t x = (i * 127) / (bars - 1);
-        uint8_t y = Rssi2Y(smoothed[i]);
-        int dx = x - prev_x;
-        int dy = y - prev_y;
-        if (dx == 0) continue; 
-        for (int s = 0; s <= dx; s++)
-        {
-            PutPixel(prev_x + s, prev_y + (dy * s) / dx, true);
-        }
-        prev_x = x;
-        prev_y = y;
-    }
-}
-
-static void ShowChannelName(uint32_t f)
-{
-    static uint32_t channelF = 0;
-    static char channelName[12]; 
-
-    if (isListening)
-    {
-        if (f != channelF) {
-            channelF = f;
-            memset(channelName, 0, sizeof(channelName));
-            for (int i = 0; i < 200; i++)
-            {
-                if (RADIO_CheckValidChannel(i, false, 0))
-                {
-                    if (SETTINGS_FetchChannelFrequency(i) == channelF)
-                    {
-                        SETTINGS_FetchChannelName(channelName, i);
-                        break;
-                    }
-                }
-            }
-        }
-        if (channelName[0] != 0) {
-            GUI_DisplaySmallest(channelName, 0, 14, false, true);
-        }
-    }
-}
-
-// --- 3. SPECTRUM & WATERFALL DRAWING ---
-
-static void DrawSpectrumEnhanced(void)
-{
-    uint16_t steps = GetStepsCount();
-    uint8_t bars = (steps > 128) ? 128 : steps;
-    uint16_t smoothed[SPECTRUM_MAX_STEPS];
-    
-    SmoothRssiHistory(rssiHistory, smoothed, bars);
-
-    for (uint8_t i = 0; i < bars; ++i) {
-        if (smoothed[i] > peakHold[i]) {
-            peakHold[i] = smoothed[i];
-        } else if (peakHold[i] > 1) {
-            peakHold[i] -= 1;
-        }
-    }
-
-    DrawSpectrumCurve(smoothed, bars);
-
-    for (uint8_t i = 0; i < bars; i += 2) {
-        uint8_t x = (i * 127) / (bars - 1);
-        PutPixel(x, Rssi2Y(peakHold[i]), true);
-    }
-}
-
-
-
-static void DrawWaterfall(void)
-{
-    static const uint8_t bayer4x4[4][4] = {
-        { 0, 8, 2, 10 }, { 12, 4, 14, 6 }, { 3, 11, 1, 9 }, { 15, 7, 13, 5 }
-    };
-    const uint8_t WATERFALL_START_Y = 41;
-    const uint8_t WATERFALL_WIDTH = 128;
-    const uint16_t SPEC_WIDTH = GetStepsCount();
-    const float xScale = (float)SPEC_WIDTH / WATERFALL_WIDTH;
-
-    for (uint8_t y_offset = 0; y_offset < WATERFALL_HISTORY_DEPTH - 1; y_offset++)
-    {
-        int8_t historyRow = (int8_t)waterfallIndex - (int8_t)y_offset;
-        if (historyRow < 0) historyRow += WATERFALL_HISTORY_DEPTH;
-
-        uint8_t y_pos = WATERFALL_START_Y + y_offset;
-        if (y_pos > 63) break;
-
-        float fade = 1.0f - (float)y_offset / (WATERFALL_HISTORY_DEPTH - 1);
-        for (uint8_t x = 0; x < WATERFALL_WIDTH; x++)
-        {
-            uint16_t specIdx = (uint16_t)(x * xScale);
-            if (specIdx >= SPEC_WIDTH - 1) specIdx = SPEC_WIDTH - 2;
-            uint8_t l0 = waterfallHistory[specIdx][historyRow];
-            uint8_t l1 = waterfallHistory[specIdx+1][historyRow];
-            float frac = (x * xScale) - specIdx;
-            uint8_t level = (uint8_t)((l0 * (1.0f - frac) + l1 * frac) * fade);
-            if (level > 15) level = 15;
-
-            if (level > bayer4x4[y_pos & 3][x & 3]) PutPixel(x, y_pos, 1);
-        }
-    }
-}
-
-// --- 4. KEYBOARD HANDLERS & SETTINGS UPDATES ---
-
 static void UpdateRssiTriggerLevel(bool inc)
 {
-    if (inc) settings.rssiTriggerLevel += 2;
-    else settings.rssiTriggerLevel -= 2;
+    if (inc)
+        settings.rssiTriggerLevel += 2;
+    else
+        settings.rssiTriggerLevel -= 2;
+
     ClampRssiTriggerLevel();
+
     redrawScreen = true;
     redrawStatus = true;
 }
 
 static void UpdateDBMax(bool inc)
 {
-    if (inc && settings.dbMax < 10) settings.dbMax += 1;
-    else if (!inc && settings.dbMax > settings.dbMin) settings.dbMax -= 1;
-    else return;
+    if (inc && settings.dbMax < 10)
+    {
+        settings.dbMax += 1;
+    }
+    else if (!inc && settings.dbMax > settings.dbMin)
+    {
+        settings.dbMax -= 1;
+    }
+    else
+    {
+        return;
+    }
 
     ClampRssiTriggerLevel();
     redrawStatus = true;
@@ -1190,73 +1078,136 @@ static void UpdateDBMax(bool inc)
 
 static void UpdateScanStep(bool inc)
 {
-    if (inc) {
-        if (settings.scanStepIndex < SCAN_STEP_COUNT - 1) settings.scanStepIndex++;
-    } else {
-        if (settings.scanStepIndex > 0) settings.scanStepIndex--;
+    if (inc)
+    {
+        settings.scanStepIndex = settings.scanStepIndex != S_STEP_100_0kHz ? settings.scanStepIndex + 1 : 0;
     }
-    redrawScreen = true; 
+    else
+    {
+        settings.scanStepIndex = settings.scanStepIndex != 0 ? settings.scanStepIndex - 1 : S_STEP_100_0kHz;
+    }
+
+    settings.frequencyChangeStep = GetBW() >> 1;
+    RelaunchScan();
+    ResetBlacklist();
+    redrawScreen = true;
 }
 
 static void UpdateCurrentFreq(bool inc)
 {
-    uint32_t step = ScanStepTable[settings.scanStepIndex];
-    if (inc) currentFreq += step;
-    else currentFreq -= step;
+    if (inc && currentFreq < F_MAX)
+    {
+        currentFreq += settings.frequencyChangeStep;
+    }
+    else if (!inc && currentFreq > F_MIN)
+    {
+        currentFreq -= settings.frequencyChangeStep;
+    }
+    else
+    {
+        return;
+    }
     RelaunchScan();
+    ResetBlacklist();
     redrawScreen = true;
 }
 
 static void UpdateCurrentFreqStill(bool inc)
 {
-    UpdateCurrentFreq(inc);
-    SYSTEM_DelayMs(50);
+    uint8_t offset = modulationTypeTuneSteps[settings.modulationType];
+    uint32_t f = fMeasure;
+    if (inc && f < F_MAX)
+    {
+        f += offset;
+    }
+    else if (!inc && f > F_MIN)
+    {
+        f -= offset;
+    }
+    SetF(f);
+    redrawScreen = true;
 }
 
 static void UpdateFreqChangeStep(bool inc)
 {
-    const uint32_t JUMP = 20000; 
-    if (inc) settings.frequencyChangeStep += JUMP;
-    else if (settings.frequencyChangeStep > JUMP) settings.frequencyChangeStep -= JUMP;
-    RelaunchScan();
+    uint16_t diff = GetScanStep() * 4;
+    if (inc && settings.frequencyChangeStep < 200000)
+    {
+        settings.frequencyChangeStep += diff;
+    }
+    else if (!inc && settings.frequencyChangeStep > 10000)
+    {
+        settings.frequencyChangeStep -= diff;
+    }
+    SYSTEM_DelayMs(100);
     redrawScreen = true;
 }
 
 static void ToggleModulation()
 {
-    settings.modulationType = (settings.modulationType + 1) % MODULATION_UKNOWN;
+    if (settings.modulationType < MODULATION_UKNOWN - 1)
+    {
+        settings.modulationType++;
+    }
+    else
+    {
+        settings.modulationType = MODULATION_FM;
+    }
     RADIO_SetModulation(settings.modulationType);
+
     RelaunchScan();
     redrawScreen = true;
 }
 
 static void ToggleListeningBW()
 {
-    settings.listenBw = (settings.listenBw + 1) % 3;
+    if (settings.listenBw == BK4819_FILTER_BW_NARROWER)
+    {
+        settings.listenBw = BK4819_FILTER_BW_WIDE;
+    }
+    else
+    {
+        settings.listenBw++;
+    }
     redrawScreen = true;
 }
 
 static void ToggleBacklight()
 {
     settings.backlightState = !settings.backlightState;
-    if (settings.backlightState) BACKLIGHT_TurnOn();
-    else BACKLIGHT_TurnOff();
+    if (settings.backlightState)
+    {
+        BACKLIGHT_TurnOn();
+    }
+    else
+    {
+        BACKLIGHT_TurnOff();
+    }
 }
 
 static void ToggleStepsCount()
 {
-    settings.stepsCount = (settings.stepsCount + 1) % 4;
+    if (settings.stepsCount == STEPS_128)
+    {
+        settings.stepsCount = STEPS_16;
+    }
+    else
+    {
+        settings.stepsCount--;
+    }
+    settings.frequencyChangeStep = GetBW() >> 1;
     RelaunchScan();
-    ResetPeak();
-    redrawScreen = true; 
+    ResetBlacklist();
+    redrawScreen = true;
 }
-
-// --- 5. FREQUENCY INPUT LOGIC ---
 
 static void ResetFreqInput()
 {
     tempFreq = 0;
-    for (int i = 0; i < 10; ++i) freqInputString[i] = '-';
+    for (int i = 0; i < 10; ++i)
+    {
+        freqInputString[i] = '-';
+    }
 }
 
 static void FreqInput()
@@ -1264,6 +1215,7 @@ static void FreqInput()
     freqInputIndex = 0;
     freqInputDotIndex = 0;
     ResetFreqInput();
+    // Reset function key state to avoid invalid transitions
     extern bool gWasFKeyPressed;
     gWasFKeyPressed = false;
     SetState(FREQ_INPUT);
@@ -1271,39 +1223,60 @@ static void FreqInput()
 
 static void UpdateFreqInput(KEY_Code_t key)
 {
-    if (key != KEY_EXIT && freqInputIndex >= 10) return;
-    if (key == KEY_STAR) {
-        if (freqInputIndex == 0 || freqInputDotIndex) return;
+    if (key != KEY_EXIT && freqInputIndex >= 10)
+    {
+        return;
+    }
+    if (key == KEY_STAR)
+    {
+        if (freqInputIndex == 0 || freqInputDotIndex)
+        {
+            return;
+        }
         freqInputDotIndex = freqInputIndex;
     }
-    if (key == KEY_EXIT) {
+    if (key == KEY_EXIT)
+    {
         freqInputIndex--;
-        if (freqInputDotIndex == freqInputIndex) freqInputDotIndex = 0;
-    } else {
+        if (freqInputDotIndex == freqInputIndex)
+            freqInputDotIndex = 0;
+    }
+    else
+    {
         freqInputArr[freqInputIndex++] = key;
     }
 
     ResetFreqInput();
-    uint8_t dotIndex = freqInputDotIndex == 0 ? freqInputIndex : freqInputDotIndex;
 
-    for (int i = 0; i < 10; ++i) {
-        if (i < freqInputIndex) {
-            KEY_Code_t digitKey = freqInputArr[i];
+    uint8_t dotIndex =
+        freqInputDotIndex == 0 ? freqInputIndex : freqInputDotIndex;
+
+    KEY_Code_t digitKey;
+    for (int i = 0; i < 10; ++i)
+    {
+        if (i < freqInputIndex)
+        {
+            digitKey = freqInputArr[i];
             freqInputString[i] = digitKey <= KEY_9 ? '0' + digitKey - KEY_0 : '.';
-        } else {
+        }
+        else
+        {
             freqInputString[i] = '-';
         }
     }
 
-    uint32_t base = 100000;
-    for (int i = dotIndex - 1; i >= 0; --i) {
+    uint32_t base = 100000; // 1MHz in BK units
+    for (int i = dotIndex - 1; i >= 0; --i)
+    {
         tempFreq += (freqInputArr[i] - KEY_0) * base;
         base *= 10;
     }
 
-    base = 10000;
-    if (dotIndex < freqInputIndex) {
-        for (int i = dotIndex + 1; i < freqInputIndex; ++i) {
+    base = 10000; // 0.1MHz in BK units
+    if (dotIndex < freqInputIndex)
+    {
+        for (int i = dotIndex + 1; i < freqInputIndex; ++i)
+        {
             tempFreq += (freqInputArr[i] - KEY_0) * base;
             base /= 10;
         }
@@ -1311,19 +1284,55 @@ static void UpdateFreqInput(KEY_Code_t key)
     redrawScreen = true;
 }
 
-// --- 5. UI ELEMENTS & SCREEN RENDER ---
-// --- UI ELEMENTS ---
-
-static void DrawF(uint32_t f)
+static void Blacklist()
 {
-    sprintf(String, "%u.%05u", f / 100000, f % 100000);
-    UI_PrintStringSmallNormal(String, 8, 127, 0);
+#ifdef ENABLE_SCAN_RANGES
+    blacklistFreqs[blacklistFreqsIdx++ % ARRAY_SIZE(blacklistFreqs)] = peak.i;
+#endif
 
-    sprintf(String, "%3s", gModulationStr[settings.modulationType]);
-    GUI_DisplaySmallest(String, 116, 1, false, true);
-    sprintf(String, "%4sk", bwOptions[settings.listenBw]);
-    GUI_DisplaySmallest(String, 108, 7, false, true);
+    SetRssiHistory(peak.i, RSSI_MAX_VALUE);
+    ResetPeak();
+    ToggleRX(false);
+    ResetScanStats();
 }
+
+#ifdef ENABLE_SCAN_RANGES
+static bool IsBlacklisted(uint16_t idx)
+{
+    if (blacklistFreqsIdx)
+        for (uint8_t i = 0; i < ARRAY_SIZE(blacklistFreqs); i++)
+            if (blacklistFreqs[i] == idx)
+                return true;
+    return false;
+}
+#endif
+
+// Draw things
+
+// applied x2 to prevent initial rounding
+uint8_t Rssi2PX(uint16_t rssi, uint8_t pxMin, uint8_t pxMax)
+{
+    const int DB_MIN = settings.dbMin << 1;
+    const int DB_MAX = settings.dbMax << 1;
+    const int DB_RANGE = DB_MAX - DB_MIN;
+
+    const uint8_t PX_RANGE = pxMax - pxMin;
+
+    int dbm = clamp(Rssi2DBm(rssi) << 1, DB_MIN, DB_MAX);
+
+    return ((dbm - DB_MIN) * PX_RANGE + DB_RANGE / 2) / DB_RANGE + pxMin;
+}
+
+uint8_t Rssi2Y(uint16_t rssi)
+{
+    return DrawingEndY - Rssi2PX(rssi, 0, DrawingEndY);
+}
+#ifdef ENABLE_FEAT_N7SIX
+    // Deprecated: Use DrawSpectrumEnhanced() instead
+    // This function is preserved for reference only
+#else
+    // Fallback implementation for non-enhanced builds
+#endif
 
 static void DrawStatus()
 {
@@ -1363,34 +1372,323 @@ static void DrawStatus()
     }
 }
 
-static void DrawRssiTriggerLevel()
+/**
+ * @brief Update waterfall display data with professional signal processing
+ *
+ * Processes the current RSSI history and converts it to 16-level grayscale
+ * for professional-grade waterfall visualization. Uses adaptive signal 
+ * detection with hysteresis to prevent flickering while maintaining detail.
+ */
+static void UpdateWaterfall(void)
 {
-    if (settings.rssiTriggerLevel == RSSI_MAX_VALUE)
-        return;
-    
-    uint8_t y = Rssi2Y(settings.rssiTriggerLevel);
-    for (uint8_t x = 0; x < 128; x += 2)
+    waterfallIndex = (waterfallIndex + 1) % WATERFALL_HISTORY_DEPTH;
+
+    // Calculate noise floor and signal detection threshold
+    uint16_t minRssi = 65535, maxRssi = 0;
+    uint32_t sumRssi = 0;
+    uint16_t validSamples = 0;
+
+    // Analyze current spectrum for dynamic thresholding
+    for (uint8_t x = 0; x < SPECTRUM_MAX_STEPS; x++)
     {
-        PutPixel(x, y, true);
+        uint16_t rssi = rssiHistory[x];
+        if (rssi != RSSI_MAX_VALUE && rssi != 0)
+        {
+            if (rssi < minRssi) minRssi = rssi;
+            if (rssi > maxRssi) maxRssi = rssi;
+            sumRssi += rssi;
+            validSamples++;
+        }
     }
+
+    // Professional waterfall processing with 16-level grayscale
+    for (uint8_t x = 0; x < SPECTRUM_MAX_STEPS; x++)
+    {
+        uint16_t rssi = rssiHistory[x];
+        uint8_t level;
+
+        if (rssi == RSSI_MAX_VALUE || rssi == 0)
+        {
+            // No data: complete transparency (level 0)
+            level = 0;
+        }
+        else if (validSamples > 0)
+        {
+            // Convert RSSI to 16-level grayscale (0-15)
+            // Uses adaptive scaling based on current spectrum range
+            uint16_t range = (maxRssi > minRssi) ? (maxRssi - minRssi) : 1;
+            uint32_t normalized = ((rssi - minRssi) * 15) / range;
+            level = (uint8_t)(normalized & 0x0F);
+            
+            // Boost visibility: expand dynamic range
+            if (level > 0 && level < 3) level = 3;
+        }
+        else
+        {
+            level = 0;
+        }
+
+        waterfallHistory[x][waterfallIndex] = level;
+    }
+}
+
+/**
+ * @brief Render professional-grade waterfall display
+ *
+ * Draws a sophisticated waterfall visualization with 16 levels of grayscale
+ * depth, providing temporal signal analysis comparable to professional
+ * spectrum analyzers. Features smooth transitions and optimized pixel patterns.
+ *
+ * Display Characteristics:
+ * - Vertical axis: Time (newest at top, oldest at bottom)
+ * - Horizontal axis: Frequency (left to right)
+ * - Color depth: 16 grayscale levels for smooth representation
+ * - Resolution: Up to 128 pixels width × 16 pixels depth
+ */
+static void DrawWaterfall(void)
+{
+    // Professional grayscale pattern table for dithering
+    // Maps 16 levels to optimal pixel patterns for visual continuity
+    static const uint8_t ditherPatterns[16] = {
+        0b00000000,  // Level 0: Empty
+        0b00010000,  // Level 1: 12.5% density
+        0b00010001,  // Level 2: 25% density
+        0b00010101,  // Level 3: 37.5% density
+        0b01010101,  // Level 4: 50% density
+        0b01010111,  // Level 5: 62.5% density
+        0b01110111,  // Level 6: 75% density
+        0b01111111,  // Level 7: 87.5% density
+        0b11111111,  // Level 8: 100% density (full signal)
+        0b11111111,  // Level 9-15: Full intensity
+        0b11111111,
+        0b11111111,
+        0b11111111,
+        0b11111111,
+        0b11111111,
+        0b11111111
+    };
+
+    const uint8_t WATERFALL_START_Y = 41;  // Professional positioning
+    const uint8_t WATERFALL_HEIGHT = WATERFALL_HISTORY_DEPTH;
+    const uint8_t WATERFALL_WIDTH = 128;  // Always full display width, independent of zoom
+    const uint16_t SPEC_WIDTH = GetStepsCount();
+    
+    // Calculate scaling factor to map spectrum points to waterfall display width
+    // This ensures waterfall stays at 128 pixels even when spectrum zoom changes
+    const float xScale = (float)SPEC_WIDTH / WATERFALL_WIDTH;
+
+    for (uint8_t y_offset = 0; y_offset < WATERFALL_HEIGHT - 1; y_offset++)
+    {
+        // Circular buffer indexing for temporal continuity
+        int8_t historyRow = (int8_t)waterfallIndex - (int8_t)y_offset;
+        if (historyRow < 0) historyRow += WATERFALL_HISTORY_DEPTH;
+
+        uint8_t y_pos = WATERFALL_START_Y + y_offset;
+        if (y_pos > 63) break;
+
+        // Fading: older rows are dimmer
+        float fade = 1.0f - (float)y_offset / (WATERFALL_HEIGHT - 1);
+        for (uint8_t x = 0; x < WATERFALL_WIDTH; x++)
+        {
+            // Interpolation: blend between adjacent bins
+            uint16_t specIdx = (uint16_t)(x * xScale);
+            if (specIdx >= SPEC_WIDTH - 1) specIdx = SPEC_WIDTH - 2;
+            uint8_t l0 = waterfallHistory[specIdx][historyRow];
+            uint8_t l1 = waterfallHistory[specIdx+1][historyRow];
+            float frac = (x * xScale) - specIdx;
+            float interp = l0 * (1.0f - frac) + l1 * frac;
+            // Apply fading
+            uint8_t level = (uint8_t)(interp * fade);
+            if (level > 15) level = 15;
+            uint8_t pattern = ditherPatterns[level];
+
+            // Intelligent pixel plotting with pattern dithering
+            if ((y_offset & 1) == 0)
+                PutPixel(x, y_pos, (pattern >> 4) & 1);
+            else
+                PutPixel(x, y_pos, (pattern >> 0) & 1);
+        }
+    }
+}
+
+/**
+ * @brief Draw enhanced spectrum display with anti-aliasing
+ *
+ * Renders the current spectrum with smooth amplitude representation
+ * and proper scaling. Supports multiple configurations for different
+ * frequency ranges and step sizes.
+ */
+// --- Spectrum Smoothing and Curve Drawing ---
+#define SMOOTHING_WINDOW 3
+static void SmoothRssiHistory(const uint16_t *input, uint16_t *output, uint8_t count)
+{
+    for (uint8_t i = 0; i < count; ++i)
+    {
+        uint32_t sum = 0;
+        uint8_t n = 0;
+        for (int8_t j = -(SMOOTHING_WINDOW/2); j <= SMOOTHING_WINDOW/2; ++j)
+        {
+            int k = i + j;
+            if (k >= 0 && k < count)
+            {
+                sum += input[k];
+                n++;
+            }
+        }
+        output[i] = (n > 0) ? (sum / n) : input[i];
+    }
+}
+
+static void DrawSpectrumCurve(const uint16_t *smoothed, uint8_t bars)
+{
+    uint8_t prev_x = 0, prev_y = 0;
+    for (uint8_t i = 0; i < bars; ++i)
+    {
+        uint8_t x = (i * 128) / bars;
+        uint8_t y = Rssi2Y(smoothed[i]);
+        if (i > 0)
+        {
+            // Draw a line between previous and current point (simple Bresenham)
+            int dx = x - prev_x;
+            int dy = y - prev_y;
+            int steps = (dx > 0) ? dx : -dx;
+            for (int s = 1; s <= steps; ++s)
+            {
+                uint8_t px = prev_x + (dx * s) / steps;
+                uint8_t py = prev_y + (dy * s) / steps;
+                PutPixel(px, py, true);
+            }
+        }
+        prev_x = x;
+        prev_y = y;
+    }
+}
+
+static void DrawSpectrumEnhanced(void)
+{
+#ifdef ENABLE_FEAT_N7SIX
+    uint16_t steps = GetStepsCount();
+    uint8_t bars = (steps > 128) ? 128 : steps;
+    uint16_t smoothed[SPECTRUM_MAX_STEPS];
+    SmoothRssiHistory(rssiHistory, smoothed, bars);
+
+    // --- Peak Hold Logic ---
+    for (uint8_t i = 0; i < bars; ++i) {
+        if (smoothed[i] > peakHold[i]) {
+            peakHold[i] = smoothed[i];
+        } else if (peakHold[i] > PEAK_HOLD_DECAY) {
+            peakHold[i] -= PEAK_HOLD_DECAY;
+        } else {
+            peakHold[i] = 0;
+        }
+    }
+
+    // Draw main spectrum curve
+    DrawSpectrumCurve(smoothed, bars);
+
+    // Draw peak hold trace (dotted line)
+    for (uint8_t i = 0; i < bars; ++i) {
+        if ((i % 2) == 0) { // Dotted effect
+            uint8_t x = (i * 128) / bars;
+            uint8_t y = Rssi2Y(peakHold[i]);
+            PutPixel(x, y, true);
+        }
+    }
+#else
+    // Fallback for systems without enhanced features
+    for (uint8_t x = 0; x < 128; ++x)
+    {
+        uint16_t rssi = rssiHistory[x >> settings.stepsCount];
+        if (rssi != RSSI_MAX_VALUE)
+        {
+            DrawVLine(Rssi2Y(rssi), DrawingEndY, x, true);
+        }
+    }
+#endif
+}
+
+#ifdef ENABLE_FEAT_N7SIX_SPECTRUM
+static void ShowChannelName(uint32_t f)
+{
+    static uint32_t channelF = 0;
+    static char channelName[12]; 
+
+    if (isListening)
+    {
+        if (f != channelF) {
+            channelF = f;
+            unsigned int i;
+            memset(channelName, 0, sizeof(channelName));
+            for (i = 0; IS_MR_CHANNEL(i); i++)
+            {
+                if (RADIO_CheckValidChannel(i, false, 0))
+                {
+                    if (SETTINGS_FetchChannelFrequency(i) == channelF)
+                    {
+                        SETTINGS_FetchChannelName(channelName, i);
+                        break;
+                    }
+                }
+            }
+        }
+        if (channelName[0] != 0) {
+            // Display channel name at top of spectrum in small font
+            // Position: below frequency/modulation info (y=14), left aligned
+            GUI_DisplaySmallest(channelName, 0, 14, false, true);
+        }
+    }
+}
+#endif
+
+static void DrawF(uint32_t f)
+{
+    sprintf(String, "%u.%05u", f / 100000, f % 100000);
+    UI_PrintStringSmallNormal(String, 8, 127, 0);
+
+    sprintf(String, "%3s", gModulationStr[settings.modulationType]);
+    GUI_DisplaySmallest(String, 116, 1, false, true);
+    sprintf(String, "%4sk", bwOptions[settings.listenBw]);
+    GUI_DisplaySmallest(String, 108, 7, false, true);
+
+#ifdef ENABLE_FEAT_N7SIX_SPECTRUM
+    ShowChannelName(f);
+#endif
 }
 
 static void DrawNums()
 {
-    if (currentState == SPECTRUM) 
+    // Frequency numbers moved from Y=38 to Y=34 (4 pixels up)
+    if (currentState == SPECTRUM)
     {
-        // 1. Draw Zoom level on the top line
-        sprintf(String, "Z:%ux", GetStepsCount());
-        GUI_DisplaySmallest(String, 0, 1, false, true); // Y=1 (Top)
-
-        // 2. Draw Step/Span on the second line
-        sprintf(String, "S:%u.%02ukHz", 
-                ScanStepTable[settings.scanStepIndex] / 100, 
-                ScanStepTable[settings.scanStepIndex] % 100);
-        GUI_DisplaySmallest(String, 0, 9, false, true); // Y=9 (Directly below)
+#ifdef ENABLE_SCAN_RANGES
+        if (gScanRangeStart)
+        {
+            sprintf(String, "%ux", GetStepsCountDisplay());
+        }
+        else
+#endif
+        {
+            sprintf(String, "%ux", GetStepsCount());
+        }
+        // Moved Y from 1 to 1 (keeping top info at top)
+        GUI_DisplaySmallest(String, 0, 1, false, true);
+        
+        sprintf(String, "%u.%02uk", GetScanStep() / 100, GetScanStep() % 100);
+                GUI_DisplaySmallest(String, 0, 7, false, true);
     }
 
-    sprintf(String, "%u.%05u", GetFStart() / 100000, GetFStart() % 100000);
+    if (IsCenterMode())
+    {
+        sprintf(String, "%u.%05u \x7F%u.%02uk", currentFreq / 100000,
+                currentFreq % 100000, settings.frequencyChangeStep / 100,
+                settings.frequencyChangeStep % 100);
+        
+        // MOVED: Y coordinate 38 -> 34
+        GUI_DisplaySmallest(String, 36, 34, false, true);
+    }
+    else
+    {
+        sprintf(String, "%u.%05u", GetFStart() / 100000, GetFStart() % 100000);
         // MOVED: Y coordinate 38 -> 34
         GUI_DisplaySmallest(String, 0, 34, false, true);
 
@@ -1402,37 +1700,47 @@ static void DrawNums()
         sprintf(String, "%u.%05u", GetFEnd() / 100000, GetFEnd() % 100000);
         // MOVED: Y coordinate 38 -> 34
         GUI_DisplaySmallest(String, 93, 34, false, true);
+    }
 }
 
+static void DrawRssiTriggerLevel()
+{
+    if (settings.rssiTriggerLevel == RSSI_MAX_VALUE || monitorMode)
+        return;
+    uint8_t y = Rssi2Y(settings.rssiTriggerLevel);
+    for (uint8_t x = 0; x < 128; x += 2)
+    {
+        PutPixel(x, y, true);
+    }
+}
+
+// --- TICK & ARROW (Moved 4 Pixels Down) ---
 static void DrawTicks()
 {
-    uint32_t fStart = GetFStart();
-    uint32_t span = GetFEnd() - fStart;
+    uint32_t f = GetFStart();
+    uint32_t span = GetFEnd() - GetFStart();
     uint32_t step = span / 128;
-    if (step == 0) step = 1;
 
-    uint8_t spacing = 128 / GetStepsCount(); 
-
-    for (uint8_t i = 0; i < 128; i++) 
+    for (uint8_t i = 0; i < 128; i += (1 << settings.stepsCount))
     {
-        uint32_t f = fStart + (uint64_t)span * i / 128;
-        bool isMajorTick = ((f % 50000) < step || (f % 100000) < step);
-        bool isSpacingPixel = (i % spacing == 0);
+        f = GetFStart() + span * i / 128;
+        
+        // Bitmask shifted to lower part of byte to move ticks down
+        uint8_t barValue = 0b00010000; 
+        if ((f % 10000) < step)  barValue |= 0b00100000;
+        if ((f % 50000) < step)  barValue |= 0b01000000;
+        if ((f % 100000) < step) barValue |= 0b10000000;
 
-        if (isSpacingPixel || isMajorTick)
-        {
-            uint8_t barValue = 0b00010000; 
-            if ((f % 10000) < step)  barValue |= 0b00100000;
-            if ((f % 50000) < step)  barValue |= 0b01000000;
-            if ((f % 100000) < step) barValue |= 0b10000000;
-            gFrameBuffer[3][i] |= barValue;
-        }
+        gFrameBuffer[3][i] |= barValue;
     }
 
-    if (IsCenterMode()) {
+    if (IsCenterMode())
+    {
         memset(gFrameBuffer[3] + 62, 0x08, 5); 
         gFrameBuffer[3][64] = 0x0f;
-    } else {
+    }
+    else
+    {
         memset(gFrameBuffer[3] + 1, 0x08, 3);
         memset(gFrameBuffer[3] + 124, 0x08, 3);
         gFrameBuffer[3][0] = 0x0f;
@@ -1442,47 +1750,123 @@ static void DrawTicks()
 
 static void DrawArrow(uint8_t x)
 {
-    for (signed i = -2; i <= 2; ++i) {
+    for (signed i = -2; i <= 2; ++i)
+    {
         signed v = x + i;
-        if (!(v & 128)) {
+        if (!(v & 128))
+        {
+            // Mask shifted down to align with ticks
             gFrameBuffer[3][v] |= (0b00000111 << my_abs(i)) & 0b00000111;
         }
     }
 }
 
-// --- 7. KEY EVENT DISPATCHERS ---
+// --- WATERFALL (X=1, Moved 5 Pixels Up) ---
+
+// --- MAIN RENDER PIPELINE ---
 
 static void OnKeyDown(uint8_t key)
 {
     switch (key)
     {
-    case KEY_3: UpdateDBMax(true); break;
-    case KEY_9: UpdateDBMax(false); break;
-    case KEY_1: UpdateScanStep(true); break;
-    case KEY_7: UpdateScanStep(false); break;
-    case KEY_2: UpdateFreqChangeStep(true); break;
-    case KEY_8: UpdateFreqChangeStep(false); break;
-    case KEY_UP: UpdateCurrentFreq(true); break;
-    case KEY_DOWN: UpdateCurrentFreq(false); break;
-    case KEY_STAR: UpdateRssiTriggerLevel(true); break;
-    case KEY_F: UpdateRssiTriggerLevel(false); break;
-    case KEY_5: FreqInput(); break;
-    case KEY_0: ToggleModulation(); break;
-    case KEY_6: ToggleListeningBW(); break;
-    case KEY_4: ToggleStepsCount(); break;
-    case KEY_SIDE2: ToggleBacklight(); break;
-    case KEY_PTT: SetState(STILL); TuneToPeak(); break;
-    case KEY_EXIT:
+    case KEY_3:
+        UpdateDBMax(true);
+        break;
+    case KEY_9:
+        UpdateDBMax(false);
+        break;
+    case KEY_1:
+        UpdateScanStep(true);
+        break;
+    case KEY_7:
+        UpdateScanStep(false);
+        break;
+    case KEY_2:
+        UpdateFreqChangeStep(true);
+        break;
+    case KEY_8:
+        UpdateFreqChangeStep(false);
+        break;
+    case KEY_UP:
+#ifdef ENABLE_SCAN_RANGES
+        if (!gScanRangeStart)
+#endif
+#ifdef ENABLE_NAVIG_LEFT_RIGHT
+            UpdateCurrentFreq(false);
+#else
+            UpdateCurrentFreq(true);
+#endif
+        break;
+    case KEY_DOWN:
+#ifdef ENABLE_SCAN_RANGES
+        if (!gScanRangeStart)
+#endif
+#ifdef ENABLE_NAVIG_LEFT_RIGHT
+            UpdateCurrentFreq(true);
+#else
+            UpdateCurrentFreq(false);
+#endif
+        break;
+    case KEY_SIDE1:
+        Blacklist();
+        break;
+    case KEY_STAR:
+        UpdateRssiTriggerLevel(true);
+        break;
+    case KEY_F:
+        UpdateRssiTriggerLevel(false);
+        break;
+    case KEY_5:
+#ifdef ENABLE_SCAN_RANGES
+        if (!gScanRangeStart)
+#endif
+            FreqInput();
+        break;
+    case KEY_0:
+        ToggleModulation();
+        break;
+    case KEY_6:
+        ToggleListeningBW();
+        break;
+    case KEY_4:
+#ifdef ENABLE_SCAN_RANGES
+        if (!gScanRangeStart)
+#endif
+            ToggleStepsCount();
+        break;
+    case KEY_SIDE2:
+        ToggleBacklight();
+        break;
+    case KEY_PTT:
+        SetState(STILL);
+        TuneToPeak();
+        break;
+    case KEY_MENU:
+        break;
+        case KEY_EXIT:
         if (menuState)
         {
             menuState = 0;
             break;
         }
+    #ifdef ENABLE_FEAT_N7SIX_SPECTRUM
+        SaveSettings();
+    #endif
+    #ifdef ENABLE_FEAT_N7SIX_RESUME_STATE
+        gEeprom.CURRENT_STATE = 0;
+        SETTINGS_WriteCurrentState();
+    #endif
         DeInitSpectrum();
-        
-        // Now that the header is at the top, these will work perfectly:
+        // Set global function state to foreground/main mode so main app resumes
+        // Ensure global state is set to foreground/main mode so main app resumes
+        #include "functions.h"
+        #include "main.h"
+        #include "ui/ui.h"
+        extern FUNCTION_Type_t gCurrentFunction;
         gCurrentFunction = FUNCTION_FOREGROUND;
         gRequestDisplayScreen = DISPLAY_MAIN;
+        break;
+    default:
         break;
     }
 }
@@ -1491,21 +1875,49 @@ static void OnKeyDownFreqInput(uint8_t key)
 {
     switch (key)
     {
-    case KEY_0: case KEY_1: case KEY_2: case KEY_3: case KEY_4:
-    case KEY_5: case KEY_6: case KEY_7: case KEY_8: case KEY_9:
-    case KEY_STAR: UpdateFreqInput(key); break;
+    case KEY_F:
+        // Ignore function key in frequency input mode to prevent crash
+        return;
+    case KEY_0:
+    case KEY_1:
+    case KEY_2:
+    case KEY_3:
+    case KEY_4:
+    case KEY_5:
+    case KEY_6:
+    case KEY_7:
+    case KEY_8:
+    case KEY_9:
+    case KEY_STAR:
+        UpdateFreqInput(key);
+        break;
     case KEY_EXIT:
-        if (freqInputIndex == 0) SetState(previousState);
-        else UpdateFreqInput(key);
+        if (freqInputIndex == 0)
+        {
+            SetState(previousState);
+            break;
+        }
+        UpdateFreqInput(key);
         break;
     case KEY_MENU:
-        if (tempFreq >= F_MIN && tempFreq <= F_MAX) {
-            SetState(previousState);
-            currentFreq = tempFreq;
+        if (tempFreq < F_MIN || tempFreq > F_MAX)
+        {
+            break;
+        }
+        SetState(previousState);
+        currentFreq = tempFreq;
+        if (currentState == SPECTRUM)
+        {
+            ResetBlacklist();
             RelaunchScan();
         }
+        else
+        {
+            SetF(currentFreq);
+        }
         break;
-    default: break;
+    default:
+        break;
     }
 }
 
@@ -1513,13 +1925,95 @@ void OnKeyDownStill(KEY_Code_t key)
 {
     switch (key)
     {
-    case KEY_3: UpdateDBMax(true); break;
-    case KEY_9: UpdateDBMax(false); break;
-    case KEY_UP: UpdateCurrentFreqStill(true); break;
-    case KEY_DOWN: UpdateCurrentFreqStill(false); break;
-    case KEY_5: FreqInput(); break;
-    case KEY_EXIT: SetState(SPECTRUM); RelaunchScan(); break;
-    default: break;
+    case KEY_3:
+        UpdateDBMax(true);
+        break;
+    case KEY_9:
+        UpdateDBMax(false);
+        break;
+    case KEY_UP:
+        if (menuState)
+
+#ifdef ENABLE_NAVIG_LEFT_RIGHT
+        {
+            SetRegMenuValue(menuState, false);
+            break;
+        }
+        UpdateCurrentFreqStill(false);
+#else
+        {
+            SetRegMenuValue(menuState, true);
+            break;
+        }
+        UpdateCurrentFreqStill(true);
+#endif
+        break;
+    case KEY_DOWN:
+        if (menuState)
+#ifdef ENABLE_NAVIG_LEFT_RIGHT
+        {
+            SetRegMenuValue(menuState, true);
+            break;
+        }
+        UpdateCurrentFreqStill(true);
+#else
+        {
+            SetRegMenuValue(menuState, false);
+            break;
+        }
+        UpdateCurrentFreqStill(false);
+#endif
+        break;
+    case KEY_STAR:
+        UpdateRssiTriggerLevel(true);
+        break;
+    case KEY_F:
+        UpdateRssiTriggerLevel(false);
+        break;
+    case KEY_5:
+        FreqInput();
+        break;
+    case KEY_0:
+        ToggleModulation();
+        break;
+    case KEY_6:
+        ToggleListeningBW();
+        break;
+    case KEY_SIDE1:
+        monitorMode = !monitorMode;
+        break;
+    case KEY_SIDE2:
+        ToggleBacklight();
+        break;
+    case KEY_PTT:
+        // TODO: start transmit
+        /* BK4819_ToggleGpioOut(BK4819_GPIO6_PIN2_GREEN, false);
+        BK4819_ToggleGpioOut(BK4819_GPIO5_PIN1_RED, true); */
+        break;
+    case KEY_MENU:
+        if (menuState == ARRAY_SIZE(registerSpecs) - 1)
+        {
+            menuState = 1;
+        }
+        else
+        {
+            menuState++;
+        }
+        redrawScreen = true;
+        break;
+    case KEY_EXIT:
+        if (!menuState)
+        {
+            SetState(SPECTRUM);
+            lockAGC = false;
+            monitorMode = false;
+            RelaunchScan();
+            break;
+        }
+        menuState = 0;
+        break;
+    default:
+        break;
     }
 }
 
@@ -1574,23 +2068,20 @@ static void RenderStatus()
  */
 static void RenderSpectrum(void)
 {
+    // Layer 1: Background/Scale - Draw frequency axis and markers
     DrawTicks();
     DrawArrow(128u * peak.i / GetStepsCount());
 
-    DrawSpectrumEnhanced(); 
+    // Layer 2: Data - Draw spectrum bars with enhanced rendering
+    DrawSpectrumEnhanced();  // Professional spectrum drawing
     DrawRssiTriggerLevel();
 
-    // --- SUGAR 1 SQUELCH LOGIC ---
-    if (peak.rssi > settings.rssiTriggerLevel) {
-        // Register 0x30 is the main audio gate for the BK chip
-        BK4819_WriteRegister(BK4819_REG_30, 0x0000); //Former BK4829_WriteRegister(0x30, 0x0000); 
-    } else {
-        BK4829_WriteRegister(0x30, 0xFFFF);
-    }
-
+    // Layer 3: Text - Draw frequency and other textual information
     DrawF(peak.f);
     DrawNums();
-    DrawWaterfall(); 
+
+    // Layer 4: Waterfall - Draw signal history (renders last for layering)
+    DrawWaterfall();  // Professional 16-level waterfall display
 }
 
 static void RenderStill()
@@ -1784,61 +2275,12 @@ static void Scan()
  * 5. Trigger waterfall update if interval reached
  * 6. Determine if scan is complete
  */
-// --- SECTION 1: CORE HELPERS ---
-
 static void NextScanStep()
 {
     ++peak.t;  // Increment peak age for timeout tracking
     ++scanInfo.i;
     scanInfo.f += scanInfo.scanStep;
 }
-
-static bool IsPeakOverLevel()
-{
-    // Hysteresis: Use a lower threshold to stay open than to open
-    uint16_t effectiveThreshold = isListening ? 
-        (settings.rssiTriggerLevel - 4) : settings.rssiTriggerLevel;
-
-    return peak.rssi > effectiveThreshold;
-}
-
-static void AutoTriggerLevel()
-{
-    // Establish the Noise Floor as the baseline to prevent "chasing" signals
-    uint16_t noiseFloor = scanInfo.rssiMin;
-    uint16_t targetTrigger = noiseFloor + 12; // ~6dB above noise
-
-    if (settings.rssiTriggerLevel == RSSI_MAX_VALUE) {
-        settings.rssiTriggerLevel = targetTrigger + 20;
-    } else {
-        if (targetTrigger > settings.rssiTriggerLevel) settings.rssiTriggerLevel++;
-        else if (targetTrigger < settings.rssiTriggerLevel) settings.rssiTriggerLevel--;
-        
-        if (settings.rssiTriggerLevel < 40) settings.rssiTriggerLevel = 40;
-    }
-}
-
-// --- SECTION 2: OPTIMIZED WATERFALL ---
-
-static void UpdateWaterfall()
-{
-    // Optimized with Integer Math for high FPS
-    for (uint8_t x = 0; x < 128; x++)
-    {
-        uint16_t rssi = rssiHistory[x >> settings.stepsCount];
-        uint8_t intensity = 0;
-        
-        if (rssi > scanInfo.rssiMin) {
-            uint32_t diff = (uint32_t)(rssi - scanInfo.rssiMin);
-            // Dynamic range stretch: maps signal-to-noise onto 16 levels
-            intensity = (uint8_t)((diff * 15) / (scanInfo.rssiMax - scanInfo.rssiMin + 1));
-        }
-        waterfallHistory[waterfallIndex][x] = intensity;
-    }
-    waterfallIndex = (waterfallIndex + 1) % WATERFALL_ROWS;
-}
-
-// --- SECTION 3: UPDATE LOOPS ---
 
 static void UpdateScan()
 {
@@ -1850,14 +2292,16 @@ static void UpdateScan()
         return;
     }
 
-    if (!(scanInfo.measurementsCount >> 7)) 
+    if (! (scanInfo.measurementsCount >> 7)) // if (scanInfo.measurementsCount < 128)
         memset(&rssiHistory[scanInfo.measurementsCount], 0,
                sizeof(rssiHistory) - scanInfo.measurementsCount * sizeof(rssiHistory[0]));
 
     redrawScreen = true;
     preventKeypress = false;
+
     UpdatePeakInfo();
     
+    // Update waterfall every 2 scans for even faster professional-style updates (50% faster)
     static uint8_t waterfallUpdateCounter = 0;
     if (++waterfallUpdateCounter >= 2)
     {
@@ -1871,6 +2315,7 @@ static void UpdateScan()
         TuneToPeak();
         return;
     }
+
     newScanStart = true;
 }
 
@@ -1878,13 +2323,12 @@ static void UpdateStill()
 {
     Measure();
     
-    // --- Professional Ballistics (Fast Attack / Slow Decay) ---
-    if (displayRssi < scanInfo.rssi) {
-        // Attack: Jump to the new signal level quickly (50% per frame)
-        displayRssi = (displayRssi + scanInfo.rssi) >> 1;
+    // Apply exponential moving average filter to reduce dBm flickering
+    // Alpha = 0.1 (10% new value, 90% old value) provides good smoothing
+    if (displayRssi == 0) {
+        displayRssi = scanInfo.rssi;  // Initialize on first call
     } else {
-        // Decay: Fall back slowly to avoid flickering (95% old, 5% new)
-        displayRssi = (displayRssi * 19 + scanInfo.rssi) / 20;
+        displayRssi = (displayRssi * 9 + scanInfo.rssi) / 10;
     }
     
     redrawScreen = true;
@@ -1903,25 +2347,30 @@ static void UpdateListening()
     preventKeypress = false;
 #ifdef ENABLE_FEAT_N7SIX_SPECTRUM
     bool tailFound = checkIfTailFound();
-    if (tailFound) listenT = 0;
-#else
-    bool tailFound = false;
-    if (currentState == STILL) listenT = 0;
-#endif
-
+    if (tailFound)
+        listenT = 0;
     if (listenT)
     {
         listenT--;
         SYSTEM_DelayMs(1);
         return;
     }
+#else
+    if (currentState == STILL)
+        listenT = 0;
+    if (listenT)
+    {
+        listenT--;
+        SYSTEM_DelayMs(1);
+        return;
+    }
+#endif
 
     if (currentState == SPECTRUM)
     {
         BK4819_WriteRegister(0x43, GetBWRegValueForScan());
         Measure();
         BK4819_WriteRegister(0x43, listenBWRegValues[settings.listenBw]);
-        
         static uint8_t waterfallUpdateCounter = 0;
         if (++waterfallUpdateCounter >= 2)
         {
@@ -1937,19 +2386,23 @@ static void UpdateListening()
     peak.rssi = scanInfo.rssi;
     redrawScreen = true;
 
+#ifdef ENABLE_FEAT_N7SIX_SPECTRUM
     if ((IsPeakOverLevel() && !tailFound) || monitorMode)
-        {
-            // STILL mode: 100ms (Very fast, used for constant monitoring)
-            // SPECTRUM mode: 400ms (Professional standard 'Squelch Tail' length)
-            listenT = (currentState == STILL) ? 100 : 400; 
-            return;
-        }
+    {
+        listenT = 100;
+        return;
+    }
+#else
+    if (IsPeakOverLevel() || monitorMode)
+    {
+        listenT = 1000;
+        return;
+    }
+#endif
 
     ToggleRX(false);
     ResetScanStats();
 }
-
-// --- SECTION 4: MAIN SYSTEM TICK ---
 
 static void Tick()
 {
@@ -1959,37 +2412,19 @@ static void Tick()
         gNextTimeslice = false;
         if (settings.modulationType == MODULATION_AM && !lockAGC)
         {
-            AM_fix_10ms(vfo); 
+            AM_fix_10ms(vfo); // allow AM_Fix to apply its AGC action
         }
     }
 #endif
 
-    // Handle user input only once per tick
-    if (!preventKeypress) HandleUserInput();
-
-    // --- SECTION: END OF SCAN PROCESSING ---
-    if (newScanStart)
-    {
-        // 1. Snapshot the whole scan into the waterfall
-        PushWaterfallLine();
-
-        // 2. Sugar 1 Squelch (Hardware Gate)
-        // Switch to BK4819 prefix so the linker can find the function
-        if (peak.rssi > settings.rssiTriggerLevel) {
-            BK4819_WriteRegister(BK4819_REG_30, 0x0000); // Open Audio Path
-        } else {
-            BK4819_WriteRegister(BK4819_REG_30, 0xFFFF); // Close Audio Path
-        }
-
-        InitScan();
-        newScanStart = false;
-    }
-
 #ifdef ENABLE_SCAN_RANGES
-    // Periodic peak check for wide spans
     if (gNextTimeslice_500ms)
     {
         gNextTimeslice_500ms = false;
+
+        // if a lot of steps then it takes long time
+        // we don't want to wait for whole scan
+        // listening has it's own timer
         if (GetStepsCount() > 128 && !isListening)
         {
             UpdatePeakInfo();
@@ -2005,31 +2440,43 @@ static void Tick()
     }
 #endif
 
-    // --- SECTION: STATE MACHINE ---
+    if (!preventKeypress)
+    {
+        HandleUserInput();
+    }
+    if (newScanStart)
+    {
+        InitScan();
+        newScanStart = false;
+    }
     if (isListening && currentState != FREQ_INPUT)
     {
         UpdateListening();
     }
     else
     {
-        if (currentState == SPECTRUM) UpdateScan();
-        else if (currentState == STILL) UpdateStill();
+        if (currentState == SPECTRUM)
+        {
+            UpdateScan();
+        }
+        else if (currentState == STILL)
+        {
+            UpdateStill();
+        }
     }
-
-    // --- SECTION: UI REFRESH ---
     if (redrawStatus || ++statuslineUpdateTimer > 4096)
     {
         RenderStatus();
         redrawStatus = false;
         statuslineUpdateTimer = 0;
     }
-
     if (redrawScreen)
     {
         Render();
-#ifdef ENABLE_FEAT_N7SIX_SCREENSHOT
-        getScreenShot(false);
-#endif
+        // For screenshot
+        #ifdef ENABLE_FEAT_N7SIX_SCREENSHOT
+            getScreenShot(false);
+        #endif
         redrawScreen = false;
     }
 }
@@ -2119,35 +2566,8 @@ void APP_RunSpectrum(void)
 
     isInitialized = true;
 
-    // Watchdog for preventKeypress stuck condition
-    uint32_t preventKeypressTimeout = 0;
     while (isInitialized)
     {
         Tick();
-        if (preventKeypress) {
-            preventKeypressTimeout++;
-            if (preventKeypressTimeout > 100000) { // ~100k cycles, adjust as needed
-                preventKeypress = false;
-                // Optionally: display warning to user here
-            }
-        } else {
-            preventKeypressTimeout = 0;
-        }
-    }
-}
-static void PushWaterfallLine(void)
-{
-    // Cycle the circular buffer
-    waterfallIndex = (waterfallIndex + 1) % WATERFALL_HISTORY_DEPTH;
-
-    uint16_t steps = GetStepsCount();
-    for (uint16_t i = 0; i < steps; i++)
-    {
-        // Map RSSI to 0-15 level
-        uint8_t level = (rssiHistory[i] > settings.dbMin) ? (rssiHistory[i] - settings.dbMin) : 0;
-        level /= 4; 
-        if (level > 15) level = 15;
-
-        waterfallHistory[i][waterfallIndex] = level;
     }
 }

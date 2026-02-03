@@ -1,12 +1,3 @@
-
-
-This file is part of a professional documentation suite:
-- [SPECTRUM_ENHANCEMENTS_SUMMARY.md](SPECTRUM_ENHANCEMENTS_SUMMARY.md)
-- [PROFESSIONAL_IMPLEMENTATION_REPORT.md](PROFESSIONAL_IMPLEMENTATION_REPORT.md)
-- [DELIVERY_SUMMARY.md](DELIVERY_SUMMARY.md)
-
----
-
 # Professional Spectrum Analyzer Implementation
 ## QS-UV-K1 Custom Firmware
 
@@ -181,19 +172,27 @@ dBm to S-Meter (IARU R.1):
 Continuous Sweep:
 - Scans entire frequency range continuously
 - User-selectable step size (6.25 kHz - 100 kHz)
+- Configurable steps per display (32-128)
+- Real-time waterfall updates
+
+Scan Ranges (Optional Feature):
+- Define custom frequency ranges
+- Automatic boundary handling
+- Intelligent bar positioning
 - Blacklist support for interference avoidance
+```
 
-**Thank You!**
+**Measurement Statistics:**
+```
+Per Scan Metrics:
+- Peak RSSI (maximum signal)
+- Peak Frequency (frequency of maximum)
+- Minimum RSSI (noise floor)
+- Average dBm (for scaled display)
 
-We sincerely thank all contributors, testers, and users for their dedication to the QS-UV-K1 Custom Firmware project. Special appreciation to:
-
-1. Egzumer
-2. OneOfEleven
-3. DualTachyon
-4. Matoz
-5. Armel, F4HWN
-6. Fagci
-and many more.
+Updated Metrics:
+- Dynamic range compression
+- Noise floor estimation
 - Signal strength classification
 - Trigger level optimization
 ```
