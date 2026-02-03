@@ -1433,48 +1433,36 @@ static void UpdateWaterfall(void)
 }
 
 /**
- * @brief Render professional-grade waterfall display
+ * @brief Render professional-grade waterfall display with 4x4 Bayer dithering
  *
- * Draws a sophisticated waterfall visualization with 16 levels of grayscale
- * depth, providing temporal signal analysis comparable to professional
- * spectrum analyzers. Features smooth transitions and optimized pixel patterns.
+ * Draws a sophisticated waterfall visualization with professional 4x4 Bayer
+ * dithering for smooth grayscale representation, temporal signal analysis
+ * comparable to premium spectrum analyzers.
  *
  * Display Characteristics:
  * - Vertical axis: Time (newest at top, oldest at bottom)
  * - Horizontal axis: Frequency (left to right)
- * - Color depth: 16 grayscale levels for smooth representation
+ * - Dithering: 4x4 Bayer matrix for smooth tone transitions
  * - Resolution: Up to 128 pixels width × 16 pixels depth
+ * - Visual Quality: Professional smooth gradients with minimal banding
  */
 static void DrawWaterfall(void)
 {
-    // Professional grayscale pattern table for dithering
-    // Maps 16 levels to optimal pixel patterns for visual continuity
-    static const uint8_t ditherPatterns[16] = {
-        0b00000000,  // Level 0: Empty
-        0b00010000,  // Level 1: 12.5% density
-        0b00010001,  // Level 2: 25% density
-        0b00010101,  // Level 3: 37.5% density
-        0b01010101,  // Level 4: 50% density
-        0b01010111,  // Level 5: 62.5% density
-        0b01110111,  // Level 6: 75% density
-        0b01111111,  // Level 7: 87.5% density
-        0b11111111,  // Level 8: 100% density (full signal)
-        0b11111111,  // Level 9-15: Full intensity
-        0b11111111,
-        0b11111111,
-        0b11111111,
-        0b11111111,
-        0b11111111,
-        0b11111111
+    // Professional 4x4 Bayer dithering matrix
+    // Values represent threshold levels (0-15) for dithering decision
+    static const uint8_t bayerMatrix[4][4] = {
+        {  0,  8,  2, 10 },
+        { 12,  4, 14,  6 },
+        {  3, 11,  1,  9 },
+        { 15,  7, 13,  5 }
     };
 
-    const uint8_t WATERFALL_START_Y = 41;  // Professional positioning
+    const uint8_t WATERFALL_START_Y = 41;
     const uint8_t WATERFALL_HEIGHT = WATERFALL_HISTORY_DEPTH;
-    const uint8_t WATERFALL_WIDTH = 128;  // Always full display width, independent of zoom
+    const uint8_t WATERFALL_WIDTH = 128;
     const uint16_t SPEC_WIDTH = GetStepsCount();
     
     // Calculate scaling factor to map spectrum points to waterfall display width
-    // This ensures waterfall stays at 128 pixels even when spectrum zoom changes
     const float xScale = (float)SPEC_WIDTH / WATERFALL_WIDTH;
 
     for (uint8_t y_offset = 0; y_offset < WATERFALL_HEIGHT - 1; y_offset++)
@@ -1486,27 +1474,43 @@ static void DrawWaterfall(void)
         uint8_t y_pos = WATERFALL_START_Y + y_offset;
         if (y_pos > 63) break;
 
-        // Fading: older rows are dimmer
-        float fade = 1.0f - (float)y_offset / (WATERFALL_HEIGHT - 1);
+        // Progressive fade: older rows are dimmer (temporal depth perception)
+        uint16_t fadeNumerator = (WATERFALL_HEIGHT - 1 - y_offset) * 16;
+        uint16_t fadeDenominator = (WATERFALL_HEIGHT - 1);
+        if (fadeDenominator == 0) fadeDenominator = 1;
+        uint8_t fadeFactor = (uint8_t)(fadeNumerator / fadeDenominator);  // 0-16
+
         for (uint8_t x = 0; x < WATERFALL_WIDTH; x++)
         {
-            // Interpolation: blend between adjacent bins
+            // Linear interpolation between adjacent frequency bins
             uint16_t specIdx = (uint16_t)(x * xScale);
             if (specIdx >= SPEC_WIDTH - 1) specIdx = SPEC_WIDTH - 2;
+            
             uint8_t l0 = waterfallHistory[specIdx][historyRow];
-            uint8_t l1 = waterfallHistory[specIdx+1][historyRow];
-            float frac = (x * xScale) - specIdx;
-            float interp = l0 * (1.0f - frac) + l1 * frac;
-            // Apply fading
-            uint8_t level = (uint8_t)(interp * fade);
-            if (level > 15) level = 15;
-            uint8_t pattern = ditherPatterns[level];
+            uint8_t l1 = waterfallHistory[specIdx + 1][historyRow];
+            
+            // Fractional part for interpolation
+            uint16_t fracNumerator = (uint16_t)(((uint32_t)x * SPEC_WIDTH * 256) / WATERFALL_WIDTH) % 256;
+            uint16_t fracDenom = 256;
+            
+            // Blend: level = l0 + (l1 - l0) * frac
+            uint16_t interpValue = ((uint16_t)l0 * (fracDenom - fracNumerator) + 
+                                    (uint16_t)l1 * fracNumerator) / fracDenom;
+            
+            // Apply fade (reduce signal intensity for older rows)
+            uint16_t fadedValue = (interpValue * fadeFactor) / 16;
+            if (fadedValue > 15) fadedValue = 15;
+            
+            uint8_t level = (uint8_t)fadedValue;
 
-            // Intelligent pixel plotting with pattern dithering
-            if ((y_offset & 1) == 0)
-                PutPixel(x, y_pos, (pattern >> 4) & 1);
-            else
-                PutPixel(x, y_pos, (pattern >> 0) & 1);
+            // 4x4 Bayer dithering: compare level against threshold from matrix
+            uint8_t matrixX = x & 3;  // x mod 4
+            uint8_t matrixY = y_offset & 3;  // y mod 4
+            uint8_t threshold = bayerMatrix[matrixY][matrixX];
+
+            // Pixel is ON if level > threshold (creates smooth gradients)
+            uint8_t pixel = (level > threshold) ? 1 : 0;
+            PutPixel(x, y_pos, pixel);
         }
     }
 }
