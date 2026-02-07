@@ -55,6 +55,9 @@
 
 #include "frequencies.h"
 #include "driver/bk4819.h"
+#include "functions.h"
+#include "main.h"
+#include "ui/ui.h"
 
 // Utility: Set LED color based on frequency and TX/RX state
 // hasSignal: true if signal is present (RSSI above threshold), false if no signal
@@ -1773,12 +1776,19 @@ static void DrawNums()
 
 static void DrawRssiTriggerLevel()
 {
-    if (settings.rssiTriggerLevel == RSSI_MAX_VALUE || monitorMode)
-        return;
     uint8_t y = Rssi2Y(settings.rssiTriggerLevel);
-    for (uint8_t x = 0; x < 128; x += 2)
+    uint8_t bank = y >> 3;
+    uint8_t bit = 1 << (y & 7);
+
+    // This is the "Gapless" version (Original)
+    // It uses 50% of the pixels in the row for a steady, solid-looking guide
+    for (uint8_t x = 0; x < 128; x++)
     {
-        PutPixel(x, y, true);
+        // Draw every even pixel to create a tight, non-blinking dotted line
+        if ((x & 1) == 0)
+        {
+            gFrameBuffer[bank][x] |= bit;
+        }
     }
 }
 
@@ -1818,13 +1828,22 @@ static void DrawTicks()
 
 static void DrawArrow(uint8_t x)
 {
+    // Professional 5x3 Solid Triangle Marker
+    // x = center position
     for (signed i = -2; i <= 2; ++i)
     {
         signed v = x + i;
-        if (!(v & 128))
+        if (!(v & 128)) // Boundary check
         {
-            // Mask shifted down to align with ticks
-            gFrameBuffer[3][v] |= (0b00000111 << my_abs(i)) & 0b00000111;
+            uint8_t column_pattern = 0;
+
+            // Define the shape per column
+            if (my_abs(i) == 0)      column_pattern = 0b11100000; // Center (tallest)
+            else if (my_abs(i) == 1) column_pattern = 0b11000000; // Inner wings
+            else if (my_abs(i) == 2) column_pattern = 0b10000000; // Outer edge
+
+            // Place in Bank 3 (Ruler Bank) using the bottom pixels
+            gFrameBuffer[3][v] |= column_pattern;
         }
     }
 }
@@ -1927,9 +1946,6 @@ static void OnKeyDown(uint8_t key)
         DeInitSpectrum();
         // Set global function state to foreground/main mode so main app resumes
         // Ensure global state is set to foreground/main mode so main app resumes
-        #include "functions.h"
-        #include "main.h"
-        #include "ui/ui.h"
         extern FUNCTION_Type_t gCurrentFunction;
         gCurrentFunction = FUNCTION_FOREGROUND;
         gRequestDisplayScreen = DISPLAY_MAIN;
@@ -2149,7 +2165,7 @@ static void RenderSpectrum(void)
     DrawNums();
 
     // Layer 4: Waterfall - Draw signal history (renders last for layering)
-    DrawWaterfall();  // Professional 16-level waterfall display
+    DrawWaterfall();  // Professional 16-level waterfall display  
 }
 
 static void RenderStill()
@@ -2366,11 +2382,21 @@ static void UpdateScan()
         } 
         else 
         {
-            // Decay: Signal is dropping. Fall back slowly to create the "mountain" fade.
-            // (70% old value + 30% new value) / 10
-            rssiHistory[scanInfo.i] = (uint8_t)((oldRssi * 7 + scanInfo.rssi * 3) / 10);
+            // Professional Linear Decay
+            // Constant subtraction is better than percentages for reaching the floor.
+            const uint8_t DECAY_STEP = 2; 
+
+        if (oldRssi > (scanInfo.rssi + DECAY_STEP)) {
+            rssiHistory[scanInfo.i] = oldRssi - DECAY_STEP;
+        } 
+        else 
+        {
+        // Floor Snap: If we are close to the noise floor, snap to it.
+        // This prevents the "Floating Base" effect.
+        rssiHistory[scanInfo.i] = scanInfo.rssi;
         }
     }
+}
 
     // Continue to next frequency step until sweep is done
     if (scanInfo.i < scanInfo.measurementsCount)
@@ -2451,42 +2477,42 @@ static void UpdateListening()
     }
 #endif
 
-    // --- 2. THE HELICOPTER FIX (RF MEASUREMENT) ---
-    // REMOVED: BK4819_WriteRegister(0x43, ...) 
-    // Changing bandwidth registers creates a sharp 'pop' or 'click' in the audio.
-    // We now measure using the current listening bandwidth for silence.
-    Measure();
-
-    peak.rssi = scanInfo.rssi;
-
-    // --- 3. THE HELICOPTER FIX (SCREEN THROTTLING) ---
-    // Only redraw the screen every 8th cycle (approx. every 100-160ms) 
-    // while listening to reduce SPI bus noise in the speaker.
+    // --- 2. THE HELICOPTER FIX (THROTTLED EXECUTION) ---
+    // We only talk to the hardware and update the screen every 8th cycle.
+    // This removes the "helicopter" buzzing/clicking from the SPI bus.
     static uint8_t quietCounter = 0;
     if (++quietCounter >= 8) 
     {
-        redrawScreen = true;
         quietCounter = 0;
-    }
+        
+        // Perform RF measurement only when quiet counter triggers
+        Measure(); 
+        peak.rssi = scanInfo.rssi;
 
-    // --- 4. STATE MANAGEMENT & SQUELCH ---
+        // Trigger screen redraw
+        redrawScreen = true;
+
+        // --- 3. STATE MANAGEMENT & SQUELCH (Inside Throttled Block) ---
 #ifdef ENABLE_FEAT_N7SIX_SPECTRUM
-    if ((IsPeakOverLevel() && !tailFound) || monitorMode)
-    {
-        listenT = 20;
-        return;
-    }
+        if ((IsPeakOverLevel() && !tailFound) || monitorMode)
+        {
+            // Squelch is open: stay in listening mode
+            // We use a shorter timer because we are already throttled
+            listenT = 2; 
+            return;
+        }
 #else
-    if (IsPeakOverLevel() || monitorMode)
-    {
-        listenT = 200;
-        return;
-    }
+        if (IsPeakOverLevel() || monitorMode)
+        {
+            listenT = 20; 
+            return;
+        }
 #endif
 
-    // If we reached here, signal is lost
-    ToggleRX(false);
-    ResetScanStats();
+        // If we reached here, signal is truly lost
+        ToggleRX(false);
+        ResetScanStats();
+    }
 }
 
 static void Tick()

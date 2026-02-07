@@ -70,7 +70,7 @@
                 "ENABLE_NAVIG_LEFT_RIGHT": true,
                 "ENABLE_SWD": false,
                 "VERSION_STRING_1": "v0.22",
-                "VERSION_STRING_2": "v7.6.2br4"
+                "VERSION_STRING_2": "v7.6.2br5"
             }
         },
         {
@@ -175,7 +175,7 @@
             }
         },
         {
-            "name": "DX1ARM",
+            "name": "ApeX",
             "inherits": "default",
             "cacheVariables": {
                 "ENABLE_SPECTRUM": true,
@@ -188,8 +188,8 @@
                 "ENABLE_FEAT_N7SIX_GMRS_FRS_MURS": true,
                 "ENABLE_FEAT_N7SIX_RESCUE_OPS": true,
                 "ENABLE_SWD": true,
-                "EDITION_STRING": "DX1ARM",
-                "TARGET": "n7six.dx1arm-k1.v7.6.2br4"
+                "EDITION_STRING": "ApeX",
+                "TARGET": "n7six.ApeX-k1.v7.6.2br5"
             }
         }
     ],
@@ -219,8 +219,8 @@
             "configurePreset": "Game"
         },
         {
-            "name": "DX1ARM",
-            "configurePreset": "DX1ARM"
+            "name": "ApeX",
+            "configurePreset": "ApeX"
         }
     ]
 }

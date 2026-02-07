@@ -99,7 +99,7 @@
 Build Results:
   Bandscope: 72.8 KB flash (60.28%) ✅
   Basic:     73.9 KB flash (61.17%) ✅
-  DX1ARM:    81.6 KB flash (67.53%) ✅
+  ApeX:    81.6 KB flash (67.53%) ✅
 
 Warnings:     0 (spectrum.c specific)
 Errors:       0

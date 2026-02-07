@@ -266,7 +266,7 @@ Performance Gain: **16x faster** for waterfall updates
 Build Summary:
   - Bandscope: 72.8 KB flash (60.28%)
   - Basic: 73.9 KB flash (61.17%)
-  - DX1ARM: 81.6 KB flash (67.53%)
+  - ApeX: 81.6 KB flash (67.53%)
 
 Quality Metrics:
   - Zero spectrum.c warnings
